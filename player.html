@@ -100,6 +100,8 @@
       const fallback = document.getElementById("fallback");
 
       let currentVideoId = "";
+      let cookiePollTimer = 0;
+      let cookieReadySent = false;
 
       function extractVideoId(value) {
         const text = decodeURIComponent(String(value || ""));
@@ -142,6 +144,76 @@
         return `${TIKTOK_ORIGIN}/player/v1/${encodeURIComponent(videoId)}?${params.toString()}`;
       }
 
+      function hasTikTokCookiesFromNative() {
+        try {
+          if (
+            window.TracefeedNative &&
+            typeof window.TracefeedNative.hasTikTokCookies === "function"
+          ) {
+            return !!window.TracefeedNative.hasTikTokCookies();
+          }
+        } catch (e) {}
+
+        return false;
+      }
+
+      function flushTikTokCookiesFromNative() {
+        try {
+          if (
+            window.TracefeedNative &&
+            typeof window.TracefeedNative.flushTikTokCookies === "function"
+          ) {
+            window.TracefeedNative.flushTikTokCookies();
+          }
+        } catch (e) {}
+      }
+
+      function notifyTracefeedNeedsCookies() {
+        forwardToTracefeed({
+          "x-tracefeed-player": true,
+          type: "tiktokCookiesNeeded",
+          videoId: currentVideoId
+        });
+      }
+
+      function notifyTracefeedCookiesReady() {
+        if (cookieReadySent) return;
+
+        cookieReadySent = true;
+        flushTikTokCookiesFromNative();
+
+        forwardToTracefeed({
+          "x-tracefeed-player": true,
+          type: "tiktokCookiesReady",
+          videoId: currentVideoId
+        });
+      }
+
+      function startCookiePolling() {
+        stopCookiePolling();
+
+        if (hasTikTokCookiesFromNative()) {
+          notifyTracefeedCookiesReady();
+          return;
+        }
+
+        notifyTracefeedNeedsCookies();
+
+        cookiePollTimer = window.setInterval(() => {
+          if (hasTikTokCookiesFromNative()) {
+            stopCookiePolling();
+            notifyTracefeedCookiesReady();
+          }
+        }, 500);
+      }
+
+      function stopCookiePolling() {
+        if (cookiePollTimer) {
+          clearInterval(cookiePollTimer);
+          cookiePollTimer = 0;
+        }
+      }
+
       function loadVideo(videoId) {
         videoId = extractVideoId(videoId);
 
@@ -149,17 +221,22 @@
           fallback.style.display = "grid";
           player.removeAttribute("src");
           currentVideoId = "";
+          stopCookiePolling();
           return;
         }
 
         fallback.style.display = "none";
 
         if (videoId === currentVideoId && player.src) {
+          startCookiePolling();
           return;
         }
 
         currentVideoId = videoId;
+        cookieReadySent = false;
         player.src = makeTikTokPlayerUrl(videoId);
+
+        startCookiePolling();
       }
 
       function forwardToTikTok(message) {
@@ -192,6 +269,11 @@
           return;
         }
 
+        if (message.type === "checkTikTokCookies") {
+          startCookiePolling();
+          return;
+        }
+
         if (message["x-tiktok-player"] === true) {
           forwardToTikTok(message);
           return;
@@ -205,6 +287,8 @@
           videoId: currentVideoId
         });
 
+        startCookiePolling();
+
         setTimeout(() => {
           forwardToTikTok({
             "x-tiktok-player": true,
@@ -217,6 +301,8 @@
           });
         }, 450);
       });
+
+      window.addEventListener("beforeunload", stopCookiePolling);
 
       loadVideo(getInitialVideoId());
     })();
