@@ -1,10 +1,25 @@
 <!doctype html>
-<html>
+<html lang="en">
 <head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta charset="utf-8" />
+  <meta
+    name="viewport"
+    content="width=device-width, initial-scale=1, viewport-fit=cover"
+  />
+  <meta name="color-scheme" content="dark" />
+  <title>Tracefeed Player</title>
+
   <style>
-    html, body {
+    :root {
+      /*
+        Increase this if the blue cookie banner still appears.
+        Try 220px, 260px, 320px, or 380px.
+      */
+      --crop-bottom: 300px;
+    }
+
+    html,
+    body {
       margin: 0;
       width: 100%;
       height: 100%;
@@ -12,53 +27,219 @@
       overflow: hidden;
     }
 
-    iframe {
-      width: 100%;
-      height: 100%;
-      border: 0;
-      display: block;
+    body {
+      position: fixed;
+      inset: 0;
+      overscroll-behavior: none;
+      touch-action: none;
+    }
+
+    #playerWrap {
+      position: fixed;
+      inset: 0;
+      width: 100vw;
+      height: 100svh;
+      overflow: hidden;
       background: #000;
+    }
+
+    #player {
+      position: absolute;
+      left: 0;
+      top: 0;
+      width: 100%;
+      height: calc(100svh + var(--crop-bottom));
+      border: 0;
+      background: #000;
+      display: block;
+    }
+
+    #fallback {
+      position: fixed;
+      inset: 0;
+      display: none;
+      place-items: center;
+      padding: 24px;
+      text-align: center;
+      background: #000;
+      color: white;
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      z-index: 5;
+    }
+
+    #fallback strong {
+      display: block;
+      font-size: 20px;
+      margin-bottom: 8px;
+    }
+
+    #fallback p {
+      margin: 0;
+      color: rgba(255,255,255,.65);
+      font-size: 14px;
+      line-height: 1.45;
     }
   </style>
 </head>
+
 <body>
-  <iframe
-    id="player"
-    allow="autoplay; encrypted-media; fullscreen; picture-in-picture"
-    referrerpolicy="strict-origin-when-cross-origin">
-  </iframe>
+  <div id="playerWrap">
+    <iframe
+      id="player"
+      title="TikTok player"
+      allow="autoplay; encrypted-media; fullscreen; picture-in-picture"
+      allowfullscreen
+      referrerpolicy="strict-origin-when-cross-origin">
+    </iframe>
+  </div>
+
+  <div id="fallback">
+    <div>
+      <strong>No video loaded</strong>
+      <p>Tracefeed did not pass a TikTok video ID to the bridge player.</p>
+    </div>
+  </div>
 
   <script>
-    const params = new URLSearchParams(location.search);
-    const id = params.get("id");
+    (() => {
+      "use strict";
 
-    const player = document.getElementById("player");
+      const TIKTOK_ORIGIN = "https://www.tiktok.com";
+      const player = document.getElementById("player");
+      const fallback = document.getElementById("fallback");
 
-    if (id) {
-      const embedParams = new URLSearchParams({
-        autoplay: "1",
-        controls: "1",
-        description: "0",
-        music_info: "0",
-        rel: "0"
+      let currentVideoId = "";
+
+      function extractVideoId(value) {
+        const text = decodeURIComponent(String(value || ""));
+
+        const patterns = [
+          /\/video\/(\d{5,})/i,
+          /\/share\/video\/(\d{5,})/i,
+          /(?:video_id|item_id|aweme_id)=?(\d{5,})/i,
+          /\b(\d{17,22})\b/
+        ];
+
+        for (const pattern of patterns) {
+          const match = text.match(pattern);
+          if (match) return match[1];
+        }
+
+        return "";
+      }
+
+      function getInitialVideoId() {
+        const params = new URLSearchParams(location.search);
+
+        return (
+          extractVideoId(params.get("videoId")) ||
+          extractVideoId(params.get("id")) ||
+          extractVideoId(params.get("url")) ||
+          extractVideoId(location.hash)
+        );
+      }
+
+      function makeTikTokPlayerUrl(videoId) {
+        const params = new URLSearchParams({
+          autoplay: "1",
+          controls: "1",
+          description: "0",
+          music_info: "0",
+          rel: "0"
+        });
+
+        return `${TIKTOK_ORIGIN}/player/v1/${encodeURIComponent(videoId)}?${params.toString()}`;
+      }
+
+      function loadVideo(videoId) {
+        videoId = extractVideoId(videoId);
+
+        if (!videoId) {
+          fallback.style.display = "grid";
+          player.removeAttribute("src");
+          currentVideoId = "";
+          return;
+        }
+
+        fallback.style.display = "none";
+
+        if (videoId === currentVideoId && player.src) {
+          return;
+        }
+
+        currentVideoId = videoId;
+        player.src = makeTikTokPlayerUrl(videoId);
+      }
+
+      function forwardToTikTok(message) {
+        if (!player.contentWindow) return;
+        player.contentWindow.postMessage(message, TIKTOK_ORIGIN);
+      }
+
+      function forwardToTracefeed(message) {
+        if (!window.parent || window.parent === window) return;
+        window.parent.postMessage(message, "*");
+      }
+
+      window.addEventListener("message", event => {
+        const message = event.data;
+
+        if (!message || typeof message !== "object") return;
+
+        /*
+          Messages coming FROM TikTok player.
+          Send them back to Tracefeed.
+        */
+        if (event.source === player.contentWindow) {
+          forwardToTracefeed(message);
+          return;
+        }
+
+        /*
+          Tracefeed can load a new video without reloading this bridge page.
+        */
+        if (message.type === "loadVideo" && message.videoId) {
+          loadVideo(message.videoId);
+          return;
+        }
+
+        if (message.type === "loadVideo" && message.url) {
+          loadVideo(message.url);
+          return;
+        }
+
+        /*
+          Tracefeed player commands:
+          play, pause, mute, unMute, seekTo, etc.
+        */
+        if (message["x-tiktok-player"] === true) {
+          forwardToTikTok(message);
+          return;
+        }
       });
 
-      player.src = `https://www.tiktok.com/player/v1/${encodeURIComponent(id)}?${embedParams}`;
-    }
+      player.addEventListener("load", () => {
+        forwardToTracefeed({
+          "x-tiktok-player": true,
+          type: "bridgeLoaded",
+          videoId: currentVideoId
+        });
 
-    window.addEventListener("message", event => {
-      const msg = event.data;
+        setTimeout(() => {
+          forwardToTikTok({
+            "x-tiktok-player": true,
+            type: "unMute"
+          });
 
-      // Forward Tracefeed commands into TikTok player
-      if (msg && msg["x-tiktok-player"] === true && player.contentWindow) {
-        player.contentWindow.postMessage(msg, "https://www.tiktok.com");
-      }
+          forwardToTikTok({
+            "x-tiktok-player": true,
+            type: "play"
+          });
+        }, 450);
+      });
 
-      // Forward TikTok player events back to Tracefeed
-      if (String(event.origin || "").includes("tiktok.com")) {
-        window.parent.postMessage(msg, "*");
-      }
-    });
+      loadVideo(getInitialVideoId());
+    })();
   </script>
 </body>
 </html>
